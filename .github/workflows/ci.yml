@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows x64 (${{ matrix.config }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [ Debug, Release ]
+
+    steps:
+      - name: Checkout NoxMcp
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (cpp-httplib, nlohmann/json)
+        shell: cmd
+        run: |
+          if not exist vendors mkdir vendors
+          git clone --depth 1 https://github.com/yhirose/cpp-httplib.git vendors\cpp-httplib
+          if not exist vendors\nlohmann mkdir vendors\nlohmann
+          curl -fSL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp -o vendors\nlohmann\json.hpp
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 -DNOXMCP_BUILD_TESTS=ON
+
+      - name: Build (${{ matrix.config }})
+        shell: pwsh
+        run: |
+          cmake --build build --config ${{ matrix.config }} --parallel
+
+      - name: Run NoxMcpTest
+        shell: pwsh
+        run: |
+          ./build/${{ matrix.config }}/NoxMcpTest.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
