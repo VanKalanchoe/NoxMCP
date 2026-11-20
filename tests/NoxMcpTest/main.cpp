@@ -1,6 +1,8 @@
 #include "NoxMcp/NoxMcp.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -445,6 +447,93 @@ static void TestMcpValidation()
           schema["Intensity"]["kind"] == "number" && schema["Inner"]["kind"] == "object", "a schema from an example: kinds ({})", schema["Color"].dump());
 }
 
+// The timing of injected input (InputPlayer): holds per frame, shared keys, motion spread over the time; and the schemas such a
+// tool's arguments are checked against.
+static void TestMcpInputPlayer()
+{
+    using namespace McpTest;
+    std::printf("\n== MCP inject_input timing\n");
+    auto has = [](const std::vector<std::pair<int, bool>>& changes, int code, bool down)
+    {
+        return std::find(changes.begin(), changes.end(), std::make_pair(code, down)) != changes.end();
+    };
+    const double frame = 1.0 / 60.0;
+
+    // A tap (no time): down for exactly one frame.
+    {
+        InputPlayer player;
+        const uint64_t id = player.Add({ { 44 }, {}, 0.0f, 0.0f, 0.0f, 0.0 });
+        InputPlayer::Frame first = player.Advance(0.0);
+        CHECK(has(first.Keys, 44, true) && first.Finished.empty() && player.IsDown(44), "a tap: down in its first frame");
+        InputPlayer::Frame second = player.Advance(frame);
+        CHECK(has(second.Keys, 44, false) && second.Finished.size() == 1 && second.Finished[0] == id && player.Empty(),
+              "a tap: released in the next frame, its call answered");
+    }
+
+    // W for 0.5 s with the mouse moving 300 px right: motion spread over the frames, all of it by the end.
+    {
+        InputPlayer player;
+        player.Add({ { 26 }, {}, 300.0f, -60.0f, 0.0f, 0.5 });
+        float movedX = 0.0f, movedY = 0.0f;
+        int framesDown = 0;
+        bool released = false;
+        double now = 10.0;
+        for (int i = 0; i < 100 && !released; ++i, now += frame)
+        {
+            InputPlayer::Frame step = player.Advance(now);
+            movedX += step.MoveX;
+            movedY += step.MoveY;
+            released = has(step.Keys, 26, false);
+            if (!released)
+                ++framesDown;
+            if (i == 10)
+                CHECK(std::abs(movedX - 300.0f * 10.0f / 30.0f) < 0.5f, "motion follows the time: {:.1f} px after a third", movedX);
+        }
+        CHECK(released && framesDown >= 30 && framesDown <= 31, "W held for 0.5 s at 60 Hz: {} frames", framesDown);
+        CHECK(std::abs(movedX - 300.0f) < 1e-3f && std::abs(movedY + 60.0f) < 1e-3f, "all the motion arrives: {:.3f}, {:.3f}", movedX, movedY);
+    }
+
+    // Two holds sharing a key: it stays down until both let go; a slow frame still delivers the rest of the motion.
+    {
+        InputPlayer player;
+        player.Add({ { 26 }, {}, 0.0f, 0.0f, 0.0f, 1.0 });       // W for 1 s
+        player.Add({ { 26, 44 }, { 1 }, 0.0f, 0.0f, 4.0f, 0.2 }); // W + Space + left button for 0.2 s, 4 notches
+        InputPlayer::Frame start = player.Advance(0.0);
+        CHECK(has(start.Keys, 26, true) && has(start.Keys, 44, true) && has(start.Buttons, 1, true) &&
+              std::count_if(start.Keys.begin(), start.Keys.end(), [](const auto& c) { return c.first == 26; }) == 1,
+              "shared key: one press for both holds");
+        InputPlayer::Frame late = player.Advance(0.5); // (one slow frame past the short hold's end)
+        CHECK(has(late.Keys, 44, false) && has(late.Buttons, 1, false) && !has(late.Keys, 26, false) && player.IsDown(26) &&
+              std::abs(late.Scroll - 4.0f) < 1e-4f && late.Finished.size() == 1,
+              "the short hold lets go of its own keys (all 4 notches), W stays down for the other");
+        InputPlayer::Frame end = player.Advance(1.0);
+        CHECK(has(end.Keys, 26, false) && player.Empty(), "W released when the last hold ends");
+    }
+
+    // Clear (Play ended): everything down comes back as a release; every hold is finished.
+    {
+        InputPlayer player;
+        player.Add({ { 4, 7 }, { 3 }, 0.0f, 0.0f, 0.0f, 5.0 });
+        player.Add({ { 22 }, {}, 0.0f, 0.0f, 0.0f, 5.0 }); // (not started yet: nothing to release)
+        player.Advance(0.0);
+        player.Add({ { 26 }, {}, 0.0f, 0.0f, 0.0f, 5.0 });
+        InputPlayer::Frame cleared = player.Clear();
+        CHECK(has(cleared.Keys, 4, false) && has(cleared.Keys, 7, false) && has(cleared.Keys, 22, false) && has(cleared.Buttons, 3, false) &&
+              !has(cleared.Keys, 26, false) && cleared.Finished.size() == 3 && player.Empty(),
+              "clear: the started holds' keys released, all three holds finished");
+    }
+
+    // The tool schemas: number and list arguments are checked.
+    {
+        const Json schema = Schema().Number("duration", "", false, 0.0, 10.0).Array("keys", "", "string").Build();
+        CHECK(Protocol::Validate(schema, Json::parse(R"({ "duration": 0.25, "keys": ["W", "Space"] })")).empty(), "a number and a list of strings fit");
+        CHECK(!Protocol::Validate(schema, Json::parse(R"({ "duration": 11 })")).empty() &&
+              !Protocol::Validate(schema, Json::parse(R"({ "keys": ["W", 3] })")).empty() &&
+              !Protocol::Validate(schema, Json::parse(R"({ "keys": "W" })")).empty(),
+              "refused: a number over its maximum, a list with a number in it, a word for a list");
+    }
+}
+
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -460,6 +549,7 @@ int main()
     TestMcpServer();
     TestMcpClientAndHighLevelApi();
     TestMcpValidation();
+    TestMcpInputPlayer();
 
     CHECK(!logs.empty(), "custom SetLogCallback received {} log messages", logs.size());
 
