@@ -13,6 +13,7 @@ A standalone C++20 **Model Context Protocol (MCP)** JSON-RPC 2.0 server, client,
 - **MCP Client & Liveness Probe (`McpClient.h`):** Forward JSON-RPC tool calls (`CallServer`) to another local MCP process and monitor server startup asynchronously (`ServerProbe`).
 - **JSON Schema & Patch Helpers (`McpValidation.h`):** Example-based schema validation, RFC 6902 JSON-Patch application, structural diffing, and recursive merging.
 - **Token Management (`McpTokenFiles.h`):** Cryptographic 256-bit bearer token generation (`BCryptGenRandom` / `/dev/urandom`) and `.gitignore`-protected token folder persistence.
+- **Timed Input (`McpInputPlayer.h`):** `InputPlayer` turns holds of keys and mouse buttons (with mouse motion and wheel notches spread over their time) into per-frame changes for an `inject_input`-style tool: shared keys stay down until every hold lets go, `Clear` releases everything. Key codes are the host's own.
 - **Hookable Callbacks (`McpLog.h`):** `SetLogCallback` (defaults to `stderr`) and optional `SetProfilerCallbacks`.
 
 ---
